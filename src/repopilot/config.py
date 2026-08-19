@@ -26,7 +26,16 @@ class Settings(BaseSettings):
     log_level: LogLevel = "INFO"
     github_token: SecretStr | None = Field(
         default=None,
-        description="Reserved for future GitHub API tools.",
+        description="GitHub REST API token.",
+    )
+    github_api_base_url: str = Field(
+        default="https://api.github.com",
+        description="Base URL for the GitHub REST API.",
+    )
+    github_request_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        description="Timeout for outbound GitHub REST API requests.",
     )
 
 
