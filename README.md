@@ -9,6 +9,7 @@ but it does not implement GitHub API functionality yet.
 - `src/` package layout
 - `pyproject.toml` with uv-compatible dependencies
 - typed environment configuration
+- isolated GitHub REST API client with mocked unit tests
 - process logging configuration
 - one harmless `health` MCP tool for discovery checks
 - pytest coverage for configuration and MCP bootstrap behavior
@@ -26,8 +27,8 @@ uv sync --dev
 ```
 
 For local configuration, copy `.env.example` to `.env` and edit values locally.
-Never commit `.env` or real credentials. `GITHUB_TOKEN` is reserved for future
-GitHub API tools and is not required now.
+Never commit `.env` or real credentials. `GITHUB_TOKEN` is used by the internal
+GitHub REST API client and is not exposed through MCP tools yet.
 
 ## Development
 
@@ -61,8 +62,10 @@ uv run repopilot-mcp
 src/repopilot/
   __init__.py
   config.py
+  github_client.py
   server.py
 tests/
+  test_github_client.py
   test_server.py
 ```
 
@@ -72,10 +75,10 @@ Implemented:
 
 - `health` MCP tool
 - settings model loaded from environment variables
+- reusable GitHub REST API client layer
 - logging bootstrap
 
 Not implemented:
 
-- GitHub REST or GraphQL API clients
 - repository, file, issue, or pull-request tools
 - write-capable GitHub operations
