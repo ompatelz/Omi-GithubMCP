@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "repopilot": {
+      "command": "uv",
+      "args": ["--directory", "C:/path/to/RepoPilot-MCP", "run", "repopilot-mcp"],
+      "env": {
+        "GITHUB_TOKEN": "${GITHUB_TOKEN}"
+      }
+    }
+  }
+}
