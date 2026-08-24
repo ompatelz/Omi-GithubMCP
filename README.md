@@ -12,6 +12,7 @@ read-only GitHub repository inspection.
 - process logging configuration
 - bounded directory and UTF-8 text-file inspection MCP tools
 - normalized, read-only GitHub issue inspection MCP tools
+- bounded, read-only pull-request and changed-file inspection MCP tools
 - pytest coverage for configuration and MCP bootstrap behavior
 - `.env.example`, `.gitignore`, GitHub Actions CI, and MIT license
 
@@ -94,3 +95,13 @@ Issue inspection uses GitHub's Issues API and remains read-only:
 - `get_issue(owner, repo, issue_number)` retrieves one known issue. It rejects a
   pull request number rather than presenting it as an issue; pull-request tools
   will be added separately.
+
+Pull-request inspection is also read-only:
+
+- `list_pull_requests(owner, repo, ...)` browses bounded PR summaries when an
+  exact pull-request number is unknown.
+- `get_pull_request(owner, repo, pull_number)` returns a known PR's branches,
+  draft/mergeability state, and change totals.
+- `get_pull_request_files(owner, repo, pull_number, ...)` returns changed-file
+  metadata and available patches. Patches over 12,000 characters are explicitly
+  truncated; unavailable patches remain `null`.

@@ -21,11 +21,22 @@ async def client():
 async def test_mcp_tools_are_discoverable_and_descriptive(client: Client) -> None:
     tools = {tool.name: tool.description for tool in (await client.list_tools()).tools}
 
-    assert set(tools) == {"list_directory", "get_file", "list_issues", "get_issue"}
+    assert set(tools) == {
+        "list_directory",
+        "get_file",
+        "list_issues",
+        "get_issue",
+        "list_pull_requests",
+        "get_pull_request",
+        "get_pull_request_files",
+    }
     assert "Inspect repository structure" in tools["list_directory"]
     assert "Inspect directories first" in tools["get_file"]
     assert "Browse repository issues" in tools["list_issues"]
     assert "known repository issue" in tools["get_issue"]
+    assert "Browse repository pull requests" in tools["list_pull_requests"]
+    assert "known pull request" in tools["get_pull_request"]
+    assert "files changed" in tools["get_pull_request_files"]
 
 
 @pytest.mark.anyio

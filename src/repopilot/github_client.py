@@ -19,6 +19,14 @@ MAX_FILE_BYTES = 100_000
 MAX_ISSUES_PER_PAGE = 100
 DEFAULT_ISSUES_PER_PAGE = 30
 ISSUE_STATES = frozenset({"open", "closed", "all"})
+MAX_PULL_REQUESTS_PER_PAGE = 100
+DEFAULT_PULL_REQUESTS_PER_PAGE = 30
+MAX_PULL_REQUEST_FILES = 50
+DEFAULT_PULL_REQUEST_FILES = 30
+MAX_PATCH_CHARS = 12_000
+PULL_REQUEST_STATES = frozenset({"open", "closed", "all"})
+PULL_REQUEST_SORTS = frozenset({"created", "updated", "popularity", "long-running"})
+DIRECTIONS = frozenset({"asc", "desc"})
 
 
 class RateLimitInfo(BaseModel):
@@ -119,6 +127,76 @@ class IssueListResult(BaseModel):
     issues: list[IssueSummary]
     count: int = Field(ge=0)
     excluded_pull_requests: int = Field(ge=0)
+    next_page: int | None = Field(default=None, ge=1)
+
+
+class PullRequestSummary(BaseModel):
+    """A compact pull request representation for list responses."""
+
+    number: int = Field(gt=0)
+    title: str
+    state: str
+    author: str | None = None
+    head_branch: str
+    base_branch: str
+    draft: bool
+    created_at: str
+    updated_at: str
+    url: str
+
+
+class PullRequestDetail(PullRequestSummary):
+    """Additional details available from GitHub's single-PR endpoint."""
+
+    body: str | None = None
+    mergeable: bool | None = None
+    additions: int = Field(ge=0)
+    deletions: int = Field(ge=0)
+    changed_files: int = Field(ge=0)
+    commit_count: int = Field(ge=0)
+    comment_count: int = Field(ge=0)
+    review_comment_count: int = Field(ge=0)
+
+
+class PullRequestListResult(BaseModel):
+    """A bounded, normalized page of pull requests."""
+
+    owner: str
+    repo: str
+    state: str
+    base: str | None = None
+    head: str | None = None
+    sort: str
+    direction: str
+    page: int = Field(ge=1)
+    limit: int = Field(ge=1, le=MAX_PULL_REQUESTS_PER_PAGE)
+    pull_requests: list[PullRequestSummary]
+    count: int = Field(ge=0)
+    next_page: int | None = Field(default=None, ge=1)
+
+
+class PullRequestFile(BaseModel):
+    """A bounded representation of a file changed by a pull request."""
+
+    filename: str
+    status: str
+    additions: int = Field(ge=0)
+    deletions: int = Field(ge=0)
+    changes: int = Field(ge=0)
+    patch: str | None = None
+    patch_truncated: bool
+
+
+class PullRequestFilesResult(BaseModel):
+    """One bounded page of changed files, with patch-size safeguards."""
+
+    owner: str
+    repo: str
+    pull_number: int = Field(gt=0)
+    files: list[PullRequestFile]
+    count: int = Field(ge=0)
+    page: int = Field(ge=1)
+    limit: int = Field(ge=1, le=MAX_PULL_REQUEST_FILES)
     next_page: int | None = Field(default=None, ge=1)
 
 
@@ -451,6 +529,118 @@ class GitHubClient:
             )
         return _issue_summary(response.data, response.status_code, response.rate_limit)
 
+    def list_pull_requests(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        state: str = "open",
+        base: str | None = None,
+        head: str | None = None,
+        sort: str = "created",
+        direction: str = "desc",
+        page: int = 1,
+        limit: int = DEFAULT_PULL_REQUESTS_PER_PAGE,
+    ) -> PullRequestListResult:
+        """Return one bounded, normalized page of repository pull requests."""
+        _validate_repository_target(owner, repo)
+        _validate_choice("state", state, PULL_REQUEST_STATES)
+        _validate_choice("sort", sort, PULL_REQUEST_SORTS)
+        _validate_choice("direction", direction, DIRECTIONS)
+        normalized_base = _validate_optional_filter("base", base)
+        normalized_head = _validate_optional_filter("head", head)
+        _validate_page_and_limit(page, limit, MAX_PULL_REQUESTS_PER_PAGE)
+        params: dict[str, Any] = {
+            "state": state,
+            "sort": sort,
+            "direction": direction,
+            "page": page,
+            "per_page": limit,
+        }
+        if normalized_base:
+            params["base"] = normalized_base
+        if normalized_head:
+            params["head"] = normalized_head
+        response = self.request("GET", _pull_requests_path(owner, repo), params=params)
+        if not isinstance(response.data, list):
+            raise GitHubResponseError(
+                "GitHub pull-request response was not a list",
+                status_code=response.status_code,
+                rate_limit=response.rate_limit,
+                details=response.data,
+            )
+        pull_requests = [
+            _pull_request_summary(item, response.status_code, response.rate_limit)
+            for item in response.data
+        ]
+        return PullRequestListResult(
+            owner=owner,
+            repo=repo,
+            state=state,
+            base=normalized_base,
+            head=normalized_head,
+            sort=sort,
+            direction=direction,
+            page=page,
+            limit=limit,
+            pull_requests=pull_requests,
+            count=len(pull_requests),
+            next_page=_next_page_number(response.next_url),
+        )
+
+    def get_pull_request(
+        self, owner: str, repo: str, pull_number: int
+    ) -> PullRequestDetail:
+        """Return one normalized pull request with detailed change metadata."""
+        _validate_repository_target(owner, repo)
+        _validate_positive_number("pull_number", pull_number)
+        response = self.request(
+            "GET", f"{_pull_requests_path(owner, repo)}/{pull_number}"
+        )
+        return _pull_request_detail(
+            response.data, response.status_code, response.rate_limit
+        )
+
+    def get_pull_request_files(
+        self,
+        owner: str,
+        repo: str,
+        pull_number: int,
+        *,
+        page: int = 1,
+        limit: int = DEFAULT_PULL_REQUEST_FILES,
+    ) -> PullRequestFilesResult:
+        """Return a bounded page of changed files with safely limited patches."""
+        _validate_repository_target(owner, repo)
+        _validate_positive_number("pull_number", pull_number)
+        _validate_page_and_limit(page, limit, MAX_PULL_REQUEST_FILES)
+        response = self.request(
+            "GET",
+            f"{_pull_requests_path(owner, repo)}/{pull_number}/files",
+            params={"page": page, "per_page": limit},
+        )
+        if not isinstance(response.data, list):
+            raise GitHubResponseError(
+                "GitHub pull-request files response was not a list",
+                status_code=response.status_code,
+                rate_limit=response.rate_limit,
+                details=response.data,
+            )
+        files = [
+            _pull_request_file(item, response.status_code, response.rate_limit)
+            for item in response.data
+        ]
+        return PullRequestFilesResult(
+            owner=owner,
+            repo=repo,
+            pull_number=pull_number,
+            files=files,
+            count=len(files),
+            page=page,
+            limit=limit,
+            next_page=_next_page_number(response.next_url),
+        )
+
     def _raise_for_error_response(
         self,
         response: httpx.Response,
@@ -500,6 +690,10 @@ def _issues_path(owner: str, repo: str) -> str:
     return f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/issues"
 
 
+def _pull_requests_path(owner: str, repo: str) -> str:
+    return f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/pulls"
+
+
 def _directory_entry(item: Any) -> DirectoryEntry:
     if not isinstance(item, dict) or not isinstance(item.get("name"), str):
         raise GitHubResponseError("GitHub returned an invalid directory entry")
@@ -544,6 +738,115 @@ def _issue_summary(
             rate_limit=rate_limit,
             details=payload,
         ) from exc
+
+
+def _pull_request_summary(
+    payload: Any, status_code: int, rate_limit: RateLimitInfo
+) -> PullRequestSummary:
+    if not isinstance(payload, dict):
+        raise GitHubResponseError(
+            "GitHub returned an invalid pull-request payload",
+            status_code=status_code,
+            rate_limit=rate_limit,
+            details=payload,
+        )
+    try:
+        return PullRequestSummary.model_validate(
+            {
+                "number": payload["number"],
+                "title": payload["title"],
+                "state": payload["state"],
+                "author": _user_login(payload.get("user")),
+                "head_branch": _branch_ref(payload.get("head")),
+                "base_branch": _branch_ref(payload.get("base")),
+                "draft": payload.get("draft", False),
+                "created_at": payload["created_at"],
+                "updated_at": payload["updated_at"],
+                "url": payload["html_url"],
+            }
+        )
+    except (KeyError, ValidationError, ValueError, TypeError) as exc:
+        raise GitHubResponseError(
+            "GitHub returned an invalid pull-request payload",
+            status_code=status_code,
+            rate_limit=rate_limit,
+            details=payload,
+        ) from exc
+
+
+def _pull_request_detail(
+    payload: Any, status_code: int, rate_limit: RateLimitInfo
+) -> PullRequestDetail:
+    summary = _pull_request_summary(payload, status_code, rate_limit)
+    if not isinstance(payload, dict):
+        raise AssertionError("validated by _pull_request_summary")
+    try:
+        return PullRequestDetail.model_validate(
+            {
+                **summary.model_dump(),
+                "body": payload.get("body"),
+                "mergeable": payload.get("mergeable"),
+                "additions": payload["additions"],
+                "deletions": payload["deletions"],
+                "changed_files": payload["changed_files"],
+                "commit_count": payload["commits"],
+                "comment_count": payload["comments"],
+                "review_comment_count": payload["review_comments"],
+            }
+        )
+    except (KeyError, ValidationError, TypeError) as exc:
+        raise GitHubResponseError(
+            "GitHub returned an invalid pull-request payload",
+            status_code=status_code,
+            rate_limit=rate_limit,
+            details=payload,
+        ) from exc
+
+
+def _pull_request_file(
+    payload: Any, status_code: int, rate_limit: RateLimitInfo
+) -> PullRequestFile:
+    if not isinstance(payload, dict):
+        raise GitHubResponseError(
+            "GitHub returned an invalid pull-request file payload",
+            status_code=status_code,
+            rate_limit=rate_limit,
+            details=payload,
+        )
+    patch = payload.get("patch")
+    if patch is not None and not isinstance(patch, str):
+        raise GitHubResponseError(
+            "GitHub returned an invalid pull-request file payload",
+            status_code=status_code,
+            rate_limit=rate_limit,
+            details=payload,
+        )
+    patch_truncated = patch is not None and len(patch) > MAX_PATCH_CHARS
+    try:
+        return PullRequestFile.model_validate(
+            {
+                "filename": payload["filename"],
+                "status": payload["status"],
+                "additions": payload["additions"],
+                "deletions": payload["deletions"],
+                "changes": payload["changes"],
+                "patch": patch[:MAX_PATCH_CHARS] if patch_truncated else patch,
+                "patch_truncated": patch_truncated,
+            }
+        )
+    except (KeyError, ValidationError, TypeError) as exc:
+        raise GitHubResponseError(
+            "GitHub returned an invalid pull-request file payload",
+            status_code=status_code,
+            rate_limit=rate_limit,
+            details=payload,
+        ) from exc
+
+
+def _branch_ref(payload: Any) -> str:
+    if not isinstance(payload, dict) or not isinstance(payload.get("ref"), str):
+        raise ValueError("invalid pull-request branch")
+    return payload["ref"]
 
 
 def _is_pull_request(payload: Any) -> bool:
@@ -592,6 +895,22 @@ def _validate_issue_state(state: str) -> str:
         accepted = ", ".join(sorted(ISSUE_STATES))
         raise ValueError(f"state must be one of: {accepted}")
     return state
+
+
+def _validate_choice(name: str, value: str, choices: frozenset[str]) -> None:
+    if value not in choices:
+        raise ValueError(f"{name} must be one of: {', '.join(sorted(choices))}")
+
+
+def _validate_positive_number(name: str, value: int) -> None:
+    if not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be at least 1")
+
+
+def _validate_page_and_limit(page: int, limit: int, maximum: int) -> None:
+    _validate_positive_number("page", page)
+    if not isinstance(limit, int) or not 1 <= limit <= maximum:
+        raise ValueError(f"limit must be between 1 and {maximum}")
 
 
 def _validate_labels(labels: list[str] | None) -> list[str]:
