@@ -10,6 +10,8 @@ from repopilot.config import configure_logging, get_settings
 from repopilot.github_client import (
     DEFAULT_DIRECTORY_ENTRIES,
     GitHubClient,
+    GitHubClientError,
+    GitHubNotFoundError,
     GitHubResponseError,
 )
 
@@ -20,15 +22,16 @@ mcp = MCPServer(settings.app_name)
 
 
 def _client() -> GitHubClient:
-    return GitHubClient(settings)
+    return GitHubClient.from_settings(settings)
 
 
 def _repository_error(error: Exception) -> MCPError:
-    if isinstance(error, (ValueError, GitHubResponseError)):
-        code = INVALID_PARAMS if isinstance(error, ValueError) else INTERNAL_ERROR
-        if isinstance(error, GitHubResponseError) and error.status_code == 404:
-            code = INVALID_PARAMS
-        return MCPError(code=code, message=str(error))
+    if isinstance(error, ValueError):
+        return MCPError(code=INVALID_PARAMS, message=str(error))
+    if isinstance(error, GitHubNotFoundError):
+        return MCPError(code=INVALID_PARAMS, message=str(error))
+    if isinstance(error, (GitHubClientError, GitHubResponseError)):
+        return MCPError(code=INTERNAL_ERROR, message=str(error))
     return MCPError(code=INTERNAL_ERROR, message="Unexpected GitHub client error")
 
 

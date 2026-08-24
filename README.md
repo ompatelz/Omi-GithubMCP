@@ -8,6 +8,7 @@ read-only GitHub repository inspection.
 - `src/` package layout
 - `pyproject.toml` with uv-compatible dependencies
 - typed environment configuration
+- isolated GitHub REST API client with mocked unit tests
 - process logging configuration
 - bounded directory and UTF-8 text-file inspection MCP tools
 - pytest coverage for configuration and MCP bootstrap behavior
@@ -63,6 +64,7 @@ src/repopilot/
   github_client.py
   server.py
 tests/
+  test_github_client.py
   test_server.py
 ```
 
