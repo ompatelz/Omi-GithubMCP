@@ -13,8 +13,10 @@ from repopilot.github_client import (
     GitHubClient,
     GitHubNotFoundError,
     GitHubPermissionError,
+    GitHubRateLimitError,
     GitHubResponseError,
     GitHubServerError,
+    GitHubTimeoutError,
     GitHubValidationError,
 )
 
@@ -265,13 +267,35 @@ def test_permission_or_rate_limit_failure_maps_to_clear_exception() -> None:
         ]
     )
 
-    with pytest.raises(GitHubPermissionError) as exc_info:
+    with pytest.raises(GitHubRateLimitError) as exc_info:
         client.request("GET", "/user")
 
     assert str(exc_info.value) == "API rate limit exceeded"
     assert exc_info.value.status_code == 403
     assert exc_info.value.rate_limit is not None
     assert exc_info.value.rate_limit.remaining == 0
+
+
+def test_non_rate_limit_permission_failure_remains_distinct() -> None:
+    client, _requests = make_client(
+        [httpx.Response(403, json={"message": "Forbidden"})]
+    )
+
+    with pytest.raises(GitHubPermissionError, match="Forbidden"):
+        client.request("GET", "/repos/octo/private")
+
+
+def test_timeout_maps_to_a_specific_exception() -> None:
+    def timeout_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("slow", request=request)
+
+    client = GitHubClient(
+        token="test-token",
+        client=httpx.Client(transport=httpx.MockTransport(timeout_handler)),
+    )
+
+    with pytest.raises(GitHubTimeoutError, match="timed out"):
+        client.request("GET", "/user")
 
 
 def test_validation_error_preserves_details() -> None:

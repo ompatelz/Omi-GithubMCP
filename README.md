@@ -113,3 +113,12 @@ The only write tools are `create_issue` and `comment_on_issue`. Both require a
 automatically retried. They should be used only with explicit user instruction.
 GitHub's issue-comment endpoint also supports pull-request conversation comments;
 this does not add review, approval, merge, or other pull-request write support.
+
+## Reliability and Security
+
+- Secrets are read only from `GITHUB_TOKEN`; RepoPilot neither logs nor returns it.
+- Requests use the configured timeout and distinguish authentication, permission,
+  rate-limit, not-found, validation, server, timeout, and network failures.
+- RepoPilot does not retry requests automatically. This deliberately prevents
+  duplicate issue or comment creation when a write response is uncertain.
+- Unit tests use mocked HTTP only; CI never needs GitHub or LLM credentials.

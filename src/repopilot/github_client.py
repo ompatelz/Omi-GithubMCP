@@ -255,6 +255,18 @@ class GitHubPermissionError(GitHubClientError):
     """Raised when GitHub rejects authorization or rate limits the request."""
 
 
+class GitHubRateLimitError(GitHubPermissionError):
+    """Raised when GitHub explicitly reports an exhausted API rate limit."""
+
+
+class GitHubTimeoutError(GitHubClientError):
+    """Raised when a GitHub request exceeds the configured timeout."""
+
+
+class GitHubNetworkError(GitHubClientError):
+    """Raised when GitHub cannot be reached due to a transport failure."""
+
+
 class GitHubNotFoundError(GitHubClientError):
     """Raised when a GitHub REST resource does not exist."""
 
@@ -334,9 +346,9 @@ class GitHubClient:
                 headers=self._headers,
             )
         except httpx.TimeoutException as exc:
-            raise GitHubClientError("GitHub request timed out") from exc
+            raise GitHubTimeoutError("GitHub request timed out") from exc
         except httpx.HTTPError as exc:
-            raise GitHubClientError("GitHub request failed") from exc
+            raise GitHubNetworkError("GitHub request failed") from exc
 
         rate_limit = RateLimitInfo.from_headers(response.headers)
         if response.is_error:
@@ -720,6 +732,10 @@ class GitHubClient:
 
         if response.status_code == 401:
             raise GitHubAuthenticationError(message, **kwargs)
+        if response.status_code == 429 or (
+            response.status_code == 403 and rate_limit.remaining == 0
+        ):
+            raise GitHubRateLimitError(message, **kwargs)
         if response.status_code == 403:
             raise GitHubPermissionError(message, **kwargs)
         if response.status_code == 404:
