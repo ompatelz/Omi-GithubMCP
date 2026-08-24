@@ -1,8 +1,7 @@
 # RepoPilot MCP
 
-RepoPilot MCP is a small Python Model Context Protocol server bootstrap. It is
-set up as a production-style starting point for future GitHub repository tools,
-but it does not implement GitHub API functionality yet.
+RepoPilot MCP is a small Python Model Context Protocol server for safe,
+read-only GitHub repository inspection.
 
 ## Included
 
@@ -10,7 +9,7 @@ but it does not implement GitHub API functionality yet.
 - `pyproject.toml` with uv-compatible dependencies
 - typed environment configuration
 - process logging configuration
-- one harmless `health` MCP tool for discovery checks
+- bounded directory and UTF-8 text-file inspection MCP tools
 - pytest coverage for configuration and MCP bootstrap behavior
 - `.env.example`, `.gitignore`, GitHub Actions CI, and MIT license
 
@@ -26,8 +25,8 @@ uv sync --dev
 ```
 
 For local configuration, copy `.env.example` to `.env` and edit values locally.
-Never commit `.env` or real credentials. `GITHUB_TOKEN` is reserved for future
-GitHub API tools and is not required now.
+Never commit `.env` or real credentials. `GITHUB_TOKEN` is optional for public
+repositories, and supports private-repository access and higher API limits.
 
 ## Development
 
@@ -61,6 +60,7 @@ uv run repopilot-mcp
 src/repopilot/
   __init__.py
   config.py
+  github_client.py
   server.py
 tests/
   test_server.py
@@ -68,14 +68,16 @@ tests/
 
 ## Current Scope
 
-Implemented:
+Implemented, read-only tools:
 
-- `health` MCP tool
-- settings model loaded from environment variables
-- logging bootstrap
+- `list_directory(owner, repo, path="", ref=None, limit=50)`: start here to
+  inspect a repository tree. Results are normalized, sorted with directories
+  first, and capped at 100 entries. If a directory is larger than the requested
+  limit, the response explicitly reports `truncated: true` and its total count.
+- `get_file(owner, repo, path, ref=None)`: use after a file path is known.
+  Returns complete UTF-8 text only; it rejects directories, binary/non-UTF-8
+  content, unavailable encodings, and files over 100,000 bytes. It never
+  silently truncates file content.
 
-Not implemented:
-
-- GitHub REST or GraphQL API clients
-- repository, file, issue, or pull-request tools
-- write-capable GitHub operations
+The server uses GitHub's Contents API only. It does not clone repositories and
+does not provide editing or other write-capable GitHub operations.

@@ -26,8 +26,10 @@ class Settings(BaseSettings):
     log_level: LogLevel = "INFO"
     github_token: SecretStr | None = Field(
         default=None,
-        description="Reserved for future GitHub API tools.",
+        description="Optional token used for authenticated GitHub API requests.",
     )
+    github_api_base_url: str = "https://api.github.com"
+    github_request_timeout_seconds: float = Field(default=10.0, gt=0)
 
 
 @lru_cache
