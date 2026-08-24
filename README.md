@@ -3,6 +3,29 @@
 RepoPilot MCP is a small Python Model Context Protocol server for safe,
  GitHub repository inspection with deliberately limited write actions.
 
+RepoPilot is an educational, intentionally smaller implementation for learning
+how AI agents, MCP, and GitHub's REST API fit together. GitHub maintains an
+official production GitHub MCP server; RepoPilot does not replace it.
+
+## Why I Built This
+
+To build and evaluate an MCP server incrementally: typed GitHub integration,
+LLM-friendly tool contracts, bounded context, deliberate write safety, and
+deterministic tests rather than a single opaque agent integration.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  Host[AI host] --> Client[MCP client]
+  Client --> Server[RepoPilot MCP server]
+  Server --> API[Typed GitHub client]
+  API --> GitHub[GitHub REST API]
+```
+
+Requests flow from an AI host through MCP tool selection into normalized client
+responses; raw GitHub payloads and tokens are not returned to the model.
+
 ## Included
 
 - `src/` package layout
@@ -79,6 +102,18 @@ tests/
 
 ## Current Scope
 
+## MCP Tools
+
+| Category | Tools |
+| --- | --- |
+| Repository content | `list_directory`, `get_file` |
+| Issues | `list_issues`, `get_issue` |
+| Pull requests | `list_pull_requests`, `get_pull_request`, `get_pull_request_files` |
+| Explicit writes | `create_issue`, `comment_on_issue` |
+
+Read tools inspect only. Write tools have immediate side effects, require a
+token, reject empty input, and are never retried automatically.
+
 Implemented, read-only tools:
 
 - `list_directory(owner, repo, path="", ref=None, limit=50)`: start here to
@@ -138,3 +173,14 @@ Record outcomes from a baseline model and the same model with RepoPilot, then
 score them with `repopilot.evaluation.score`. The harness reports accuracy,
 completion, hallucination, tool selection, calls, latency, and errors; it does
 not call an LLM or fabricate benchmark results.
+
+## Limitations and Future Work
+
+RepoPilot does not support OAuth, GraphQL, remote transport, file mutation,
+branch creation, PR creation/merging, workflow execution, or permission edits.
+Potential extensions remain deliberately out of scope until explicitly chosen.
+
+## Demo
+
+See [DEMO.md](DEMO.md) for a concise portfolio/demo sequence. See
+[INTEGRATION.md](INTEGRATION.md) for client setup and the manual smoke test.
