@@ -29,6 +29,8 @@ async def test_mcp_tools_are_discoverable_and_descriptive(client: Client) -> Non
         "list_pull_requests",
         "get_pull_request",
         "get_pull_request_files",
+        "create_issue",
+        "comment_on_issue",
     }
     assert "Inspect repository structure" in tools["list_directory"]
     assert "Inspect directories first" in tools["get_file"]
@@ -37,6 +39,8 @@ async def test_mcp_tools_are_discoverable_and_descriptive(client: Client) -> Non
     assert "Browse repository pull requests" in tools["list_pull_requests"]
     assert "known pull request" in tools["get_pull_request"]
     assert "files changed" in tools["get_pull_request_files"]
+    assert "write action" in tools["create_issue"]
+    assert "write action" in tools["comment_on_issue"]
 
 
 @pytest.mark.anyio

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from collections.abc import Iterator
 
 import httpx
@@ -656,3 +657,78 @@ def test_pull_request_not_found_and_malformed_payload_are_clear_errors() -> None
         missing_client.get_pull_request("octo", "demo", 12)
     with pytest.raises(GitHubResponseError, match="invalid pull-request payload"):
         malformed_client.list_pull_requests("octo", "demo")
+
+
+def test_create_issue_sends_one_authenticated_post_and_normalizes_confirmation() -> (
+    None
+):
+    client, requests = make_client(
+        [
+            httpx.Response(
+                201,
+                json={
+                    "id": 44,
+                    "number": 9,
+                    "title": "Document safety",
+                    "state": "open",
+                    "html_url": "https://github.com/octo/demo/issues/9",
+                },
+            )
+        ]
+    )
+
+    result = client.create_issue("octo", "demo", "Document safety", "Details", ["docs"])
+
+    assert requests[0].method == "POST"
+    assert requests[0].url.path == "/repos/octo/demo/issues"
+    assert json.loads(requests[0].content) == {
+        "title": "Document safety",
+        "body": "Details",
+        "labels": ["docs"],
+    }
+    assert result.number == 9
+    assert result.url.endswith("/9")
+
+
+def test_write_operations_validate_before_requests_and_require_a_token() -> None:
+    client, requests = make_client([])
+    with pytest.raises(ValueError, match="title must be"):
+        client.create_issue("octo", "demo", " ", "body")
+    with pytest.raises(ValueError, match="body must be"):
+        client.comment_on_issue("octo", "demo", 7, " ")
+    assert requests == []
+
+    unauthenticated = GitHubClient(
+        token=None,
+        client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: pytest.fail("request should not be sent")
+            )
+        ),
+    )
+    with pytest.raises(ValueError, match="GITHUB_TOKEN"):
+        unauthenticated.create_issue("octo", "demo", "Title", "body")
+
+
+def test_comment_on_issue_sends_one_authenticated_post_and_confirms_result() -> None:
+    client, requests = make_client(
+        [
+            httpx.Response(
+                201,
+                json={
+                    "id": 81,
+                    "body": "Investigating this.",
+                    "html_url": "https://github.com/octo/demo/issues/7#issuecomment-81",
+                    "created_at": "2026-08-24T10:00:00Z",
+                },
+            )
+        ]
+    )
+
+    result = client.comment_on_issue("octo", "demo", 7, "Investigating this.")
+
+    assert requests[0].method == "POST"
+    assert requests[0].url.path == "/repos/octo/demo/issues/7/comments"
+    assert json.loads(requests[0].content) == {"body": "Investigating this."}
+    assert result.id == 81
+    assert result.issue_number == 7
