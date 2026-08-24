@@ -61,6 +61,9 @@ Run the server directly over stdio:
 uv run repopilot-mcp
 ```
 
+See [INTEGRATION.md](INTEGRATION.md) for a client configuration example and the
+separation between automated MCP checks and an optional manual live smoke test.
+
 ## Project Structure
 
 ```text
