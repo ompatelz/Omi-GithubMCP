@@ -11,6 +11,7 @@ read-only GitHub repository inspection.
 - isolated GitHub REST API client with mocked unit tests
 - process logging configuration
 - bounded directory and UTF-8 text-file inspection MCP tools
+- normalized, read-only GitHub issue inspection MCP tools
 - pytest coverage for configuration and MCP bootstrap behavior
 - `.env.example`, `.gitignore`, GitHub Actions CI, and MIT license
 
@@ -83,3 +84,13 @@ Implemented, read-only tools:
 
 The server uses GitHub's Contents API only. It does not clone repositories and
 does not provide editing or other write-capable GitHub operations.
+
+Issue inspection uses GitHub's Issues API and remains read-only:
+
+- `list_issues(owner, repo, state="open", labels=None, assignee=None, page=1, limit=30)`
+  browses a bounded, filterable page of issues when the issue number is unknown.
+  GitHub includes pull requests in this endpoint, so RepoPilot excludes them and
+  reports how many were excluded.
+- `get_issue(owner, repo, issue_number)` retrieves one known issue. It rejects a
+  pull request number rather than presenting it as an issue; pull-request tools
+  will be added separately.
