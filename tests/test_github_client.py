@@ -516,3 +516,143 @@ def test_issue_malformed_payload_is_a_clear_client_error() -> None:
 
     with pytest.raises(GitHubResponseError, match="invalid issue payload"):
         client.list_issues("octo", "demo")
+
+
+def pull_request_payload(number: int = 12, **overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "number": number,
+        "title": "Improve parser",
+        "state": "open",
+        "user": {"login": "octocat"},
+        "head": {"ref": "feature/parser"},
+        "base": {"ref": "main"},
+        "draft": False,
+        "body": "A clearer parser",
+        "mergeable": None,
+        "additions": 14,
+        "deletions": 3,
+        "changed_files": 2,
+        "commits": 1,
+        "comments": 4,
+        "review_comments": 2,
+        "created_at": "2026-08-22T10:00:00Z",
+        "updated_at": "2026-08-23T11:00:00Z",
+        "html_url": "https://github.com/octo/demo/pull/12",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_list_pull_requests_normalizes_filters_and_pagination() -> None:
+    client, requests = make_client(
+        [
+            httpx.Response(
+                200,
+                json=[pull_request_payload()],
+                headers={
+                    "link": (
+                        "<https://api.github.test/repos/octo/demo/pulls?page=3>; "
+                        'rel="next"'
+                    )
+                },
+            )
+        ]
+    )
+
+    result = client.list_pull_requests(
+        "octo", "demo", state="all", base="main", sort="updated", page=2, limit=5
+    )
+
+    assert dict(requests[0].url.params) == {
+        "state": "all",
+        "sort": "updated",
+        "direction": "desc",
+        "page": "2",
+        "per_page": "5",
+        "base": "main",
+    }
+    assert result.count == 1
+    assert result.next_page == 3
+    assert result.pull_requests[0].head_branch == "feature/parser"
+
+
+def test_get_pull_request_returns_detailed_change_metadata() -> None:
+    client, requests = make_client([httpx.Response(200, json=pull_request_payload())])
+
+    result = client.get_pull_request("octo", "demo", 12)
+
+    assert requests[0].url.path == "/repos/octo/demo/pulls/12"
+    assert result.additions == 14
+    assert result.mergeable is None
+    assert result.review_comment_count == 2
+
+
+def test_get_pull_request_files_limits_large_patches() -> None:
+    large_patch = "+" * 12_001
+    client, requests = make_client(
+        [
+            httpx.Response(
+                200,
+                json=[
+                    {
+                        "filename": "src/parser.py",
+                        "status": "modified",
+                        "additions": 12_001,
+                        "deletions": 0,
+                        "changes": 12_001,
+                        "patch": large_patch,
+                    },
+                    {
+                        "filename": "image.png",
+                        "status": "modified",
+                        "additions": 0,
+                        "deletions": 0,
+                        "changes": 0,
+                    },
+                ],
+            )
+        ]
+    )
+
+    result = client.get_pull_request_files("octo", "demo", 12, limit=2)
+
+    assert dict(requests[0].url.params) == {"page": "1", "per_page": "2"}
+    assert len(result.files[0].patch or "") == 12_000
+    assert result.files[0].patch_truncated is True
+    assert result.files[1].patch is None
+    assert result.files[1].patch_truncated is False
+
+
+@pytest.mark.parametrize(
+    ("method", "kwargs", "message"),
+    [
+        ("list_pull_requests", {"state": "merged"}, "state must be one of"),
+        ("list_pull_requests", {"sort": "title"}, "sort must be one of"),
+        ("list_pull_requests", {"limit": 101}, "limit must be between"),
+        ("get_pull_request", {"pull_number": 0}, "pull_number must be"),
+        ("get_pull_request_files", {"pull_number": 0}, "pull_number must be"),
+    ],
+)
+def test_pull_request_parameters_are_rejected_before_requests(
+    method: str, kwargs: dict[str, object], message: str
+) -> None:
+    client, requests = make_client([])
+
+    with pytest.raises(ValueError, match=message):
+        getattr(client, method)("octo", "demo", **kwargs)
+
+    assert requests == []
+
+
+def test_pull_request_not_found_and_malformed_payload_are_clear_errors() -> None:
+    missing_client, _requests = make_client(
+        [httpx.Response(404, json={"message": "Not Found"})]
+    )
+    malformed_client, _requests = make_client(
+        [httpx.Response(200, json=[{"number": 12}])]
+    )
+
+    with pytest.raises(GitHubNotFoundError, match="Not Found"):
+        missing_client.get_pull_request("octo", "demo", 12)
+    with pytest.raises(GitHubResponseError, match="invalid pull-request payload"):
+        malformed_client.list_pull_requests("octo", "demo")

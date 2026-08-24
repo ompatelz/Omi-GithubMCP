@@ -10,6 +10,8 @@ from repopilot.config import configure_logging, get_settings
 from repopilot.github_client import (
     DEFAULT_DIRECTORY_ENTRIES,
     DEFAULT_ISSUES_PER_PAGE,
+    DEFAULT_PULL_REQUEST_FILES,
+    DEFAULT_PULL_REQUESTS_PER_PAGE,
     GitHubClient,
     GitHubClientError,
     GitHubNotFoundError,
@@ -113,6 +115,75 @@ def get_issue(owner: str, repo: str, issue_number: int) -> dict[str, object]:
     """
     try:
         return _client().get_issue(owner, repo, issue_number).model_dump()
+    except Exception as exc:
+        raise _github_error(exc) from exc
+
+
+@mcp.tool()
+def list_pull_requests(
+    owner: str,
+    repo: str,
+    state: str = "open",
+    base: str | None = None,
+    head: str | None = None,
+    sort: str = "created",
+    direction: str = "desc",
+    page: int = 1,
+    limit: int = DEFAULT_PULL_REQUESTS_PER_PAGE,
+) -> dict[str, object]:
+    """Browse repository pull requests when an exact PR number is unknown.
+
+    Returns a bounded page with optional state, branch, and ordering filters.
+    Use get_pull_request for detail or get_pull_request_files for changed files.
+    """
+    try:
+        return (
+            _client()
+            .list_pull_requests(
+                owner,
+                repo,
+                state=state,
+                base=base,
+                head=head,
+                sort=sort,
+                direction=direction,
+                page=page,
+                limit=limit,
+            )
+            .model_dump()
+        )
+    except Exception as exc:
+        raise _github_error(exc) from exc
+
+
+@mcp.tool()
+def get_pull_request(owner: str, repo: str, pull_number: int) -> dict[str, object]:
+    """Inspect one known pull request by its exact number, including change totals."""
+    try:
+        return _client().get_pull_request(owner, repo, pull_number).model_dump()
+    except Exception as exc:
+        raise _github_error(exc) from exc
+
+
+@mcp.tool()
+def get_pull_request_files(
+    owner: str,
+    repo: str,
+    pull_number: int,
+    page: int = 1,
+    limit: int = DEFAULT_PULL_REQUEST_FILES,
+) -> dict[str, object]:
+    """Inspect files changed by one known pull request with bounded diff patches.
+
+    Large patches are truncated to 12,000 characters per file and marked in the
+    response; GitHub may omit a patch when it is unavailable.
+    """
+    try:
+        return (
+            _client()
+            .get_pull_request_files(owner, repo, pull_number, page=page, limit=limit)
+            .model_dump()
+        )
     except Exception as exc:
         raise _github_error(exc) from exc
 
