@@ -354,3 +354,165 @@ def test_malformed_user_payload_is_clear_error() -> None:
 
     assert exc_info.value.status_code == 200
     assert exc_info.value.details
+
+
+def issue_payload(number: int = 7, **overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "number": number,
+        "title": "Fix the parser",
+        "state": "open",
+        "user": {"login": "octocat"},
+        "labels": [{"name": "bug"}],
+        "assignees": [{"login": "maintainer"}],
+        "body": "Steps to reproduce",
+        "comments": 2,
+        "created_at": "2026-08-20T10:00:00Z",
+        "updated_at": "2026-08-21T11:00:00Z",
+        "html_url": "https://github.com/octo/demo/issues/7",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_list_issues_normalizes_filters_and_excludes_pull_requests() -> None:
+    issue = issue_payload()
+    pull_request = issue_payload(
+        8,
+        title="Improve docs",
+        pull_request={"url": "https://api.github.test/repos/octo/demo/pulls/8"},
+    )
+    client, requests = make_client(
+        [
+            httpx.Response(
+                200,
+                json=[issue, pull_request],
+                headers={
+                    "link": (
+                        "<https://api.github.test/repos/octo/demo/issues?page=3"
+                        '&per_page=2>; rel="next"'
+                    )
+                },
+            )
+        ]
+    )
+
+    result = client.list_issues(
+        "octo",
+        "demo",
+        state="closed",
+        labels=["bug", "needs-review"],
+        assignee="maintainer",
+        page=2,
+        limit=2,
+    )
+
+    assert requests[0].url.path == "/repos/octo/demo/issues"
+    assert dict(requests[0].url.params) == {
+        "state": "closed",
+        "labels": "bug,needs-review",
+        "assignee": "maintainer",
+        "page": "2",
+        "per_page": "2",
+    }
+    assert result.model_dump() == {
+        "owner": "octo",
+        "repo": "demo",
+        "state": "closed",
+        "labels": ["bug", "needs-review"],
+        "assignee": "maintainer",
+        "page": 2,
+        "limit": 2,
+        "issues": [
+            {
+                "number": 7,
+                "title": "Fix the parser",
+                "state": "open",
+                "author": "octocat",
+                "labels": ["bug"],
+                "assignees": ["maintainer"],
+                "body": "Steps to reproduce",
+                "comment_count": 2,
+                "created_at": "2026-08-20T10:00:00Z",
+                "updated_at": "2026-08-21T11:00:00Z",
+                "url": "https://github.com/octo/demo/issues/7",
+            }
+        ],
+        "count": 1,
+        "excluded_pull_requests": 1,
+        "next_page": 3,
+    }
+
+
+def test_list_issues_returns_empty_results() -> None:
+    client, _requests = make_client([httpx.Response(200, json=[])])
+
+    result = client.list_issues("octo", "demo", state="all")
+
+    assert result.issues == []
+    assert result.count == 0
+    assert result.excluded_pull_requests == 0
+    assert result.next_page is None
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"state": "pending"}, "state must be one of"),
+        ({"labels": [""]}, "labels must contain"),
+        ({"assignee": " "}, "assignee must be"),
+        ({"page": 0}, "page must be"),
+        ({"limit": 101}, "limit must be"),
+    ],
+)
+def test_list_issues_rejects_invalid_parameters_before_request(
+    kwargs: dict[str, object], message: str
+) -> None:
+    client, requests = make_client([])
+
+    with pytest.raises(ValueError, match=message):
+        client.list_issues("octo", "demo", **kwargs)
+
+    assert requests == []
+
+
+def test_get_issue_normalizes_a_known_issue() -> None:
+    client, requests = make_client([httpx.Response(200, json=issue_payload())])
+
+    result = client.get_issue("octo", "demo", 7)
+
+    assert requests[0].url.path == "/repos/octo/demo/issues/7"
+    assert result.number == 7
+    assert result.author == "octocat"
+    assert result.comment_count == 2
+
+
+def test_get_issue_rejects_a_pull_request() -> None:
+    client, _requests = make_client(
+        [httpx.Response(200, json=issue_payload(pull_request={"url": "x"}))]
+    )
+
+    with pytest.raises(ValueError, match="pull request"):
+        client.get_issue("octo", "demo", 7)
+
+
+def test_issue_not_found_and_api_failure_propagate() -> None:
+    missing_client, _requests = make_client(
+        [httpx.Response(404, json={"message": "Not Found"})]
+    )
+    failure_client, _requests = make_client(
+        [httpx.Response(503, json={"message": "Service unavailable"})]
+    )
+
+    with pytest.raises(GitHubNotFoundError, match="Not Found"):
+        missing_client.get_issue("octo", "demo", 99)
+    with pytest.raises(GitHubServerError, match="Service unavailable"):
+        failure_client.list_issues("octo", "demo")
+
+
+def test_issue_malformed_payload_is_a_clear_client_error() -> None:
+    client, _requests = make_client(
+        [httpx.Response(200, json=[issue_payload(labels=[{"color": "red"}])])]
+    )
+
+    with pytest.raises(GitHubResponseError, match="invalid issue payload"):
+        client.list_issues("octo", "demo")
