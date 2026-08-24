@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from collections.abc import Iterator
 
 import httpx
@@ -85,11 +86,12 @@ def test_get_authenticated_user_sends_github_headers_and_captures_rate_limit() -
     assert response.rate_limit.resource == "core"
 
 
-def test_client_from_settings_requires_github_token() -> None:
+def test_client_from_settings_allows_missing_token_for_public_reads() -> None:
     settings = Settings(github_token=None)
 
-    with pytest.raises(GitHubAuthenticationError, match="GITHUB_TOKEN is required"):
-        GitHubClient.from_settings(settings)
+    client = GitHubClient.from_settings(settings)
+
+    assert isinstance(client, GitHubClient)
 
 
 def test_authentication_failure_maps_to_clear_exception() -> None:
@@ -114,6 +116,141 @@ def test_not_found_maps_to_clear_exception() -> None:
 
     assert str(exc_info.value) == "Not Found"
     assert exc_info.value.status_code == 404
+
+
+def test_list_directory_normalizes_and_limits_results() -> None:
+    client, requests = make_client(
+        [
+            httpx.Response(
+                200,
+                json=[
+                    {
+                        "name": "README.md",
+                        "path": "README.md",
+                        "type": "file",
+                        "size": 12,
+                    },
+                    {"name": "src", "path": "src", "type": "dir", "size": 0},
+                    {"name": "tests", "path": "tests", "type": "dir", "size": 0},
+                ],
+            )
+        ]
+    )
+
+    result = client.list_directory("octo", "demo", ref="main", limit=2)
+
+    assert str(requests[0].url) == (
+        "https://api.github.test/repos/octo/demo/contents?ref=main"
+    )
+    assert [entry.path for entry in result.entries] == ["src", "tests"]
+    assert result.ref == "main"
+    assert result.returned_entries == 2
+    assert result.total_entries == 3
+    assert result.truncated is True
+
+
+def test_list_directory_rejects_file_path() -> None:
+    client, _requests = make_client(
+        [httpx.Response(200, json={"type": "file", "name": "README.md"})]
+    )
+
+    with pytest.raises(ValueError, match="file, not a directory"):
+        client.list_directory("octo", "demo", "README.md")
+
+
+def test_missing_path_preserves_github_not_found_response() -> None:
+    client, _requests = make_client(
+        [httpx.Response(404, json={"message": "Not Found"})]
+    )
+
+    with pytest.raises(GitHubNotFoundError, match="Not Found") as error:
+        client.get_file("octo", "demo", "missing.txt")
+
+    assert error.value.status_code == 404
+
+
+def test_get_file_returns_complete_utf8_text() -> None:
+    content = "# Demo\n"
+    client, requests = make_client(
+        [
+            httpx.Response(
+                200,
+                json={
+                    "type": "file",
+                    "size": len(content.encode()),
+                    "encoding": "base64",
+                    "content": base64.b64encode(content.encode()).decode(),
+                },
+            )
+        ]
+    )
+
+    result = client.get_file("octo", "demo", "README.md", "dev")
+
+    assert str(requests[0].url) == (
+        "https://api.github.test/repos/octo/demo/contents/README.md?ref=dev"
+    )
+    assert result.content == content
+    assert result.size_bytes == len(content.encode())
+    assert result.ref == "dev"
+
+
+def test_get_file_rejects_binary_content() -> None:
+    binary = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+    client, _requests = make_client(
+        [
+            httpx.Response(
+                200,
+                json={
+                    "type": "file",
+                    "size": len(binary),
+                    "encoding": "base64",
+                    "content": base64.b64encode(binary).decode(),
+                },
+            )
+        ]
+    )
+
+    with pytest.raises(ValueError, match="binary"):
+        client.get_file("octo", "demo", "logo.png")
+
+
+def test_get_file_rejects_unsupported_encoding() -> None:
+    client, _requests = make_client(
+        [
+            httpx.Response(
+                200,
+                json={
+                    "type": "file",
+                    "size": 12,
+                    "encoding": "none",
+                    "content": None,
+                },
+            )
+        ]
+    )
+
+    with pytest.raises(ValueError, match="unsupported encoding"):
+        client.get_file("octo", "demo", "README.md")
+
+
+def test_get_file_rejects_large_file_without_truncating() -> None:
+    client, _requests = make_client(
+        [
+            httpx.Response(
+                200,
+                json={
+                    "type": "file",
+                    "size": 100_001,
+                    "encoding": "base64",
+                    "content": "",
+                },
+            )
+        ]
+    )
+
+    with pytest.raises(ValueError, match="too large"):
+        client.get_file("octo", "demo", "large.txt")
 
 
 def test_permission_or_rate_limit_failure_maps_to_clear_exception() -> None:

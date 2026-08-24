@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Self
+from urllib.parse import quote
 
 import httpx
-from pydantic import BaseModel, ConfigDict, SecretStr, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
 from repopilot.config import Settings
+
+MAX_DIRECTORY_ENTRIES = 100
+DEFAULT_DIRECTORY_ENTRIES = 50
+MAX_FILE_BYTES = 100_000
 
 
 class RateLimitInfo(BaseModel):
@@ -44,6 +50,41 @@ class GitHubUser(BaseModel):
     html_url: str | None = None
     name: str | None = None
     type: str | None = None
+
+
+class DirectoryEntry(BaseModel):
+    """A compact entry in a repository directory."""
+
+    name: str
+    path: str
+    type: str
+    size: int | None = None
+
+
+class DirectoryListing(BaseModel):
+    """A bounded repository directory result."""
+
+    owner: str
+    repo: str
+    path: str = ""
+    ref: str | None = None
+    entries: list[DirectoryEntry]
+    returned_entries: int
+    total_entries: int
+    truncated: bool
+    limit: int
+
+
+class FileContent(BaseModel):
+    """A readable UTF-8 repository file."""
+
+    owner: str
+    repo: str
+    path: str
+    ref: str | None = None
+    size_bytes: int = Field(ge=0)
+    encoding: str = "utf-8"
+    content: str
 
 
 @dataclass(frozen=True)
@@ -108,13 +149,9 @@ class GitHubClient:
         timeout: float = 10.0,
         client: httpx.Client | None = None,
     ) -> None:
-        if isinstance(token, SecretStr):
-            token_value = token.get_secret_value()
-        else:
-            token_value = token
-        if not token_value:
-            raise GitHubAuthenticationError("GITHUB_TOKEN is required")
-
+        token_value = (
+            token.get_secret_value() if isinstance(token, SecretStr) else token
+        )
         self._headers = _default_headers(token_value)
         self._owns_client = client is None
         self._client = client or httpx.Client(
@@ -217,6 +254,94 @@ class GitHubClient:
             next_path = response.next_url
             request_params = None
 
+    def list_directory(
+        self,
+        owner: str,
+        repo: str,
+        path: str = "",
+        ref: str | None = None,
+        limit: int = DEFAULT_DIRECTORY_ENTRIES,
+    ) -> DirectoryListing:
+        """List one repository directory, returning at most ``limit`` entries."""
+
+        if not 1 <= limit <= MAX_DIRECTORY_ENTRIES:
+            raise ValueError(f"limit must be between 1 and {MAX_DIRECTORY_ENTRIES}")
+
+        normalized_path = path.strip("/")
+        response = self.request(
+            "GET",
+            _contents_path(owner, repo, normalized_path),
+            params={"ref": ref} if ref else None,
+        )
+        if not isinstance(response.data, list):
+            raise ValueError("The requested path is a file, not a directory")
+
+        entries = [_directory_entry(item) for item in response.data]
+        entries.sort(key=lambda item: (item.type != "dir", item.name.lower()))
+
+        return DirectoryListing(
+            owner=owner,
+            repo=repo,
+            path=normalized_path,
+            ref=ref,
+            entries=entries[:limit],
+            returned_entries=min(len(entries), limit),
+            total_entries=len(entries),
+            truncated=len(entries) > limit,
+            limit=limit,
+        )
+
+    def get_file(
+        self, owner: str, repo: str, path: str, ref: str | None = None
+    ) -> FileContent:
+        """Return a complete UTF-8 text file or a clear, actionable error."""
+
+        normalized_path = path.strip("/")
+        response = self.request(
+            "GET",
+            _contents_path(owner, repo, normalized_path),
+            params={"ref": ref} if ref else None,
+        )
+        payload = response.data
+        if not isinstance(payload, dict) or payload.get("type") != "file":
+            raise ValueError("The requested path is a directory, not a file")
+
+        size = payload.get("size")
+        if not isinstance(size, int) or size < 0:
+            raise GitHubResponseError(
+                "GitHub returned an invalid file size",
+                status_code=response.status_code,
+                rate_limit=response.rate_limit,
+                details=payload,
+            )
+        if size > MAX_FILE_BYTES:
+            raise ValueError(
+                f"File is too large ({size} bytes); maximum is {MAX_FILE_BYTES} bytes"
+            )
+
+        encoded = payload.get("content")
+        if payload.get("encoding") != "base64" or not isinstance(encoded, str):
+            raise ValueError(
+                "File content is unavailable or uses an unsupported encoding"
+            )
+        try:
+            raw_content = base64.b64decode("".join(encoded.split()), validate=True)
+            content = raw_content.decode("utf-8")
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ValueError("File is binary or not valid UTF-8 text") from exc
+
+        if len(raw_content) > MAX_FILE_BYTES:
+            raise ValueError(f"File is too large; maximum is {MAX_FILE_BYTES} bytes")
+
+        return FileContent(
+            owner=owner,
+            repo=repo,
+            path=normalized_path,
+            ref=ref,
+            size_bytes=len(raw_content),
+            content=content,
+        )
+
     def _raise_for_error_response(
         self,
         response: httpx.Response,
@@ -245,13 +370,32 @@ class GitHubClient:
         raise GitHubClientError(message, **kwargs)
 
 
-def _default_headers(token: str) -> dict[str, str]:
-    return {
+def _default_headers(token: str | None) -> dict[str, str]:
+    headers = {
         "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {token}",
         "User-Agent": "RepoPilot-MCP",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _contents_path(owner: str, repo: str, path: str) -> str:
+    base = f"/repos/{owner}/{repo}/contents"
+    encoded_path = quote(path, safe="/")
+    return f"{base}/{encoded_path}" if encoded_path else base
+
+
+def _directory_entry(item: Any) -> DirectoryEntry:
+    if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+        raise GitHubResponseError("GitHub returned an invalid directory entry")
+    return DirectoryEntry(
+        name=item["name"],
+        path=item.get("path", item["name"]),
+        type=item.get("type", "unknown"),
+        size=item.get("size"),
+    )
 
 
 def _normalize_path(path: str) -> str:

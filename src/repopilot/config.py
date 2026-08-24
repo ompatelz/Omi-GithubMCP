@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     log_level: LogLevel = "INFO"
     github_token: SecretStr | None = Field(
         default=None,
-        description="GitHub REST API token.",
+        description="Optional token used for authenticated GitHub API requests.",
     )
     github_api_base_url: str = Field(
         default="https://api.github.com",
