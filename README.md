@@ -122,3 +122,12 @@ this does not add review, approval, merge, or other pull-request write support.
 - RepoPilot does not retry requests automatically. This deliberately prevents
   duplicate issue or comment creation when a write response is uncertain.
 - Unit tests use mocked HTTP only; CI never needs GitHub or LLM credentials.
+
+## Evaluation
+
+`evaluation_cases.json` contains 15 provider-neutral cases covering discovery,
+files, issues, PRs, tool choice, unknown information, and permitted writes.
+Record outcomes from a baseline model and the same model with RepoPilot, then
+score them with `repopilot.evaluation.score`. The harness reports accuracy,
+completion, hallucination, tool selection, calls, latency, and errors; it does
+not call an LLM or fabricate benchmark results.
