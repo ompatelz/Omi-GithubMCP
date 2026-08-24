@@ -33,6 +33,10 @@ repositories, and supports private-repository access and higher API limits.
 
 ## Development
 
+CI runs locked dependency installation, Ruff formatting/linting, and the
+isolated pytest suite on Python 3.11 and 3.12. It has read-only repository
+permissions and never requires GitHub or LLM credentials.
+
 Run tests:
 
 ```powershell
