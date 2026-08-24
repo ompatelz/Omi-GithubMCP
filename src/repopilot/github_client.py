@@ -6,7 +6,7 @@ import base64
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Self
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
@@ -16,6 +16,9 @@ from repopilot.config import Settings
 MAX_DIRECTORY_ENTRIES = 100
 DEFAULT_DIRECTORY_ENTRIES = 50
 MAX_FILE_BYTES = 100_000
+MAX_ISSUES_PER_PAGE = 100
+DEFAULT_ISSUES_PER_PAGE = 30
+ISSUE_STATES = frozenset({"open", "closed", "all"})
 
 
 class RateLimitInfo(BaseModel):
@@ -85,6 +88,38 @@ class FileContent(BaseModel):
     size_bytes: int = Field(ge=0)
     encoding: str = "utf-8"
     content: str
+
+
+class IssueSummary(BaseModel):
+    """A compact, normalized GitHub issue suitable for MCP responses."""
+
+    number: int = Field(gt=0)
+    title: str
+    state: str
+    author: str | None = None
+    labels: list[str]
+    assignees: list[str]
+    body: str | None = None
+    comment_count: int = Field(ge=0)
+    created_at: str
+    updated_at: str
+    url: str
+
+
+class IssueListResult(BaseModel):
+    """A single, normalized page of repository issues."""
+
+    owner: str
+    repo: str
+    state: str
+    labels: list[str]
+    assignee: str | None = None
+    page: int = Field(ge=1)
+    limit: int = Field(ge=1, le=MAX_ISSUES_PER_PAGE)
+    issues: list[IssueSummary]
+    count: int = Field(ge=0)
+    excluded_pull_requests: int = Field(ge=0)
+    next_page: int | None = Field(default=None, ge=1)
 
 
 @dataclass(frozen=True)
@@ -342,6 +377,80 @@ class GitHubClient:
             content=content,
         )
 
+    def list_issues(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        state: str = "open",
+        labels: list[str] | None = None,
+        assignee: str | None = None,
+        page: int = 1,
+        limit: int = DEFAULT_ISSUES_PER_PAGE,
+    ) -> IssueListResult:
+        """Return one normalized page of issues, excluding pull requests."""
+
+        _validate_repository_target(owner, repo)
+        normalized_state = _validate_issue_state(state)
+        normalized_labels = _validate_labels(labels)
+        normalized_assignee = _validate_optional_filter("assignee", assignee)
+        if page < 1:
+            raise ValueError("page must be at least 1")
+        if not 1 <= limit <= MAX_ISSUES_PER_PAGE:
+            raise ValueError(f"limit must be between 1 and {MAX_ISSUES_PER_PAGE}")
+
+        params: dict[str, Any] = {
+            "state": normalized_state,
+            "page": page,
+            "per_page": limit,
+        }
+        if normalized_labels:
+            params["labels"] = ",".join(normalized_labels)
+        if normalized_assignee:
+            params["assignee"] = normalized_assignee
+
+        response = self.request("GET", _issues_path(owner, repo), params=params)
+        if not isinstance(response.data, list):
+            raise GitHubResponseError(
+                "GitHub issues response was not a list",
+                status_code=response.status_code,
+                rate_limit=response.rate_limit,
+                details=response.data,
+            )
+
+        issue_payloads = [item for item in response.data if not _is_pull_request(item)]
+        issues = [
+            _issue_summary(item, response.status_code, response.rate_limit)
+            for item in issue_payloads
+        ]
+        return IssueListResult(
+            owner=owner,
+            repo=repo,
+            state=normalized_state,
+            labels=normalized_labels,
+            assignee=normalized_assignee,
+            page=page,
+            limit=limit,
+            issues=issues,
+            count=len(issues),
+            excluded_pull_requests=len(response.data) - len(issue_payloads),
+            next_page=_next_page_number(response.next_url),
+        )
+
+    def get_issue(self, owner: str, repo: str, issue_number: int) -> IssueSummary:
+        """Return one issue, rejecting pull requests returned by GitHub's issue API."""
+
+        _validate_repository_target(owner, repo)
+        if issue_number < 1:
+            raise ValueError("issue_number must be at least 1")
+
+        response = self.request("GET", f"{_issues_path(owner, repo)}/{issue_number}")
+        if _is_pull_request(response.data):
+            raise ValueError(
+                "The requested number is a pull request; use pull-request tools instead"
+            )
+        return _issue_summary(response.data, response.status_code, response.rate_limit)
+
     def _raise_for_error_response(
         self,
         response: httpx.Response,
@@ -387,6 +496,10 @@ def _contents_path(owner: str, repo: str, path: str) -> str:
     return f"{base}/{encoded_path}" if encoded_path else base
 
 
+def _issues_path(owner: str, repo: str) -> str:
+    return f"/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/issues"
+
+
 def _directory_entry(item: Any) -> DirectoryEntry:
     if not isinstance(item, dict) or not isinstance(item.get("name"), str):
         raise GitHubResponseError("GitHub returned an invalid directory entry")
@@ -396,6 +509,105 @@ def _directory_entry(item: Any) -> DirectoryEntry:
         type=item.get("type", "unknown"),
         size=item.get("size"),
     )
+
+
+def _issue_summary(
+    payload: Any, status_code: int, rate_limit: RateLimitInfo
+) -> IssueSummary:
+    if not isinstance(payload, dict):
+        raise GitHubResponseError(
+            "GitHub returned an invalid issue payload",
+            status_code=status_code,
+            rate_limit=rate_limit,
+            details=payload,
+        )
+    try:
+        return IssueSummary.model_validate(
+            {
+                "number": payload["number"],
+                "title": payload["title"],
+                "state": payload["state"],
+                "author": _user_login(payload.get("user")),
+                "labels": _label_names(payload.get("labels")),
+                "assignees": _assignee_logins(payload.get("assignees")),
+                "body": payload.get("body"),
+                "comment_count": payload["comments"],
+                "created_at": payload["created_at"],
+                "updated_at": payload["updated_at"],
+                "url": payload["html_url"],
+            }
+        )
+    except (KeyError, ValidationError, ValueError, TypeError) as exc:
+        raise GitHubResponseError(
+            "GitHub returned an invalid issue payload",
+            status_code=status_code,
+            rate_limit=rate_limit,
+            details=payload,
+        ) from exc
+
+
+def _is_pull_request(payload: Any) -> bool:
+    return isinstance(payload, dict) and "pull_request" in payload
+
+
+def _user_login(payload: Any) -> str | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("login"), str):
+        raise ValueError("invalid issue author")
+    return payload["login"]
+
+
+def _label_names(payload: Any) -> list[str]:
+    if not isinstance(payload, list):
+        raise ValueError("invalid issue labels")
+    names: list[str] = []
+    for label in payload:
+        if not isinstance(label, dict) or not isinstance(label.get("name"), str):
+            raise ValueError("invalid issue label")
+        names.append(label["name"])
+    return names
+
+
+def _assignee_logins(payload: Any) -> list[str]:
+    if not isinstance(payload, list):
+        raise ValueError("invalid issue assignees")
+    logins: list[str] = []
+    for assignee in payload:
+        if not isinstance(assignee, dict) or not isinstance(assignee.get("login"), str):
+            raise ValueError("invalid issue assignee")
+        logins.append(assignee["login"])
+    return logins
+
+
+def _validate_repository_target(owner: str, repo: str) -> None:
+    if not isinstance(owner, str) or not owner.strip() or "/" in owner:
+        raise ValueError("owner must be a non-empty GitHub owner name")
+    if not isinstance(repo, str) or not repo.strip() or "/" in repo:
+        raise ValueError("repo must be a non-empty GitHub repository name")
+
+
+def _validate_issue_state(state: str) -> str:
+    if state not in ISSUE_STATES:
+        accepted = ", ".join(sorted(ISSUE_STATES))
+        raise ValueError(f"state must be one of: {accepted}")
+    return state
+
+
+def _validate_labels(labels: list[str] | None) -> list[str]:
+    if labels is None:
+        return []
+    if not isinstance(labels, list) or any(
+        not isinstance(label, str) or not label.strip() for label in labels
+    ):
+        raise ValueError("labels must contain only non-empty label names")
+    return labels
+
+
+def _validate_optional_filter(name: str, value: str | None) -> str | None:
+    if value is not None and (not isinstance(value, str) or not value.strip()):
+        raise ValueError(f"{name} must be a non-empty string when provided")
+    return value
 
 
 def _normalize_path(path: str) -> str:
@@ -449,3 +661,16 @@ def _response_next_url(response: httpx.Response) -> str | None:
         return None
     url = next_link.get("url")
     return url if isinstance(url, str) else None
+
+
+def _next_page_number(next_url: str | None) -> int | None:
+    if not next_url:
+        return None
+    page_values = parse_qs(urlparse(next_url).query).get("page")
+    if not page_values:
+        return None
+    try:
+        page = int(page_values[0])
+    except ValueError:
+        return None
+    return page if page >= 1 else None
