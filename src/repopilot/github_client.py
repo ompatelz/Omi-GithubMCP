@@ -200,6 +200,26 @@ class PullRequestFilesResult(BaseModel):
     next_page: int | None = Field(default=None, ge=1)
 
 
+class CreatedIssue(BaseModel):
+    """Confirmation returned after creating an issue."""
+
+    id: int = Field(gt=0)
+    number: int = Field(gt=0)
+    title: str
+    state: str
+    url: str
+
+
+class IssueCommentConfirmation(BaseModel):
+    """Confirmation returned after adding one issue or PR conversation comment."""
+
+    id: int = Field(gt=0)
+    issue_number: int = Field(gt=0)
+    body: str
+    url: str
+    created_at: str
+
+
 @dataclass(frozen=True)
 class GitHubResponse:
     """Normalized response payload plus useful API metadata."""
@@ -265,6 +285,7 @@ class GitHubClient:
         token_value = (
             token.get_secret_value() if isinstance(token, SecretStr) else token
         )
+        self._has_token = bool(token_value)
         self._headers = _default_headers(token_value)
         self._owns_client = client is None
         self._client = client or httpx.Client(
@@ -641,6 +662,47 @@ class GitHubClient:
             next_page=_next_page_number(response.next_url),
         )
 
+    def create_issue(
+        self,
+        owner: str,
+        repo: str,
+        title: str,
+        body: str,
+        labels: list[str] | None = None,
+    ) -> CreatedIssue:
+        """Create one issue with one non-retried authenticated POST request."""
+        _validate_repository_target(owner, repo)
+        self._require_write_authentication()
+        _validate_required_text("title", title)
+        _validate_required_text("body", body)
+        normalized_labels = _validate_labels(labels)
+        payload: dict[str, Any] = {"title": title, "body": body}
+        if normalized_labels:
+            payload["labels"] = normalized_labels
+        response = self.request("POST", _issues_path(owner, repo), json=payload)
+        return _created_issue(response.data, response.status_code, response.rate_limit)
+
+    def comment_on_issue(
+        self, owner: str, repo: str, issue_number: int, body: str
+    ) -> IssueCommentConfirmation:
+        """Add one non-retried authenticated conversation comment to an issue or PR."""
+        _validate_repository_target(owner, repo)
+        self._require_write_authentication()
+        _validate_positive_number("issue_number", issue_number)
+        _validate_required_text("body", body)
+        response = self.request(
+            "POST",
+            f"{_issues_path(owner, repo)}/{issue_number}/comments",
+            json={"body": body},
+        )
+        return _issue_comment_confirmation(
+            response.data, issue_number, response.status_code, response.rate_limit
+        )
+
+    def _require_write_authentication(self) -> None:
+        if not self._has_token:
+            raise ValueError("GITHUB_TOKEN is required for write operations")
+
     def _raise_for_error_response(
         self,
         response: httpx.Response,
@@ -849,6 +911,64 @@ def _branch_ref(payload: Any) -> str:
     return payload["ref"]
 
 
+def _created_issue(
+    payload: Any, status_code: int, rate_limit: RateLimitInfo
+) -> CreatedIssue:
+    if not isinstance(payload, dict):
+        raise GitHubResponseError(
+            "GitHub returned an invalid created-issue payload",
+            status_code=status_code,
+            rate_limit=rate_limit,
+            details=payload,
+        )
+    try:
+        return CreatedIssue.model_validate(
+            {
+                "id": payload["id"],
+                "number": payload["number"],
+                "title": payload["title"],
+                "state": payload["state"],
+                "url": payload["html_url"],
+            }
+        )
+    except (KeyError, ValidationError, TypeError) as exc:
+        raise GitHubResponseError(
+            "GitHub returned an invalid created-issue payload",
+            status_code=status_code,
+            rate_limit=rate_limit,
+            details=payload,
+        ) from exc
+
+
+def _issue_comment_confirmation(
+    payload: Any, issue_number: int, status_code: int, rate_limit: RateLimitInfo
+) -> IssueCommentConfirmation:
+    if not isinstance(payload, dict):
+        raise GitHubResponseError(
+            "GitHub returned an invalid issue-comment payload",
+            status_code=status_code,
+            rate_limit=rate_limit,
+            details=payload,
+        )
+    try:
+        return IssueCommentConfirmation.model_validate(
+            {
+                "id": payload["id"],
+                "issue_number": issue_number,
+                "body": payload["body"],
+                "url": payload["html_url"],
+                "created_at": payload["created_at"],
+            }
+        )
+    except (KeyError, ValidationError, TypeError) as exc:
+        raise GitHubResponseError(
+            "GitHub returned an invalid issue-comment payload",
+            status_code=status_code,
+            rate_limit=rate_limit,
+            details=payload,
+        ) from exc
+
+
 def _is_pull_request(payload: Any) -> bool:
     return isinstance(payload, dict) and "pull_request" in payload
 
@@ -905,6 +1025,11 @@ def _validate_choice(name: str, value: str, choices: frozenset[str]) -> None:
 def _validate_positive_number(name: str, value: int) -> None:
     if not isinstance(value, int) or value < 1:
         raise ValueError(f"{name} must be at least 1")
+
+
+def _validate_required_text(name: str, value: str) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
 
 
 def _validate_page_and_limit(page: int, limit: int, maximum: int) -> None:

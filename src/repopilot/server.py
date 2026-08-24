@@ -188,6 +188,36 @@ def get_pull_request_files(
         raise _github_error(exc) from exc
 
 
+@mcp.tool()
+def create_issue(
+    owner: str, repo: str, title: str, body: str, labels: list[str] | None = None
+) -> dict[str, object]:
+    """Create a new GitHub issue. This write action has immediate side effects.
+
+    Use only when explicitly asked to create an issue. Requires GITHUB_TOKEN with
+    repository issue-write permission. The request is never automatically retried.
+    """
+    try:
+        return _client().create_issue(owner, repo, title, body, labels).model_dump()
+    except Exception as exc:
+        raise _github_error(exc) from exc
+
+
+@mcp.tool()
+def comment_on_issue(
+    owner: str, repo: str, issue_number: int, body: str
+) -> dict[str, object]:
+    """Add one comment to a known GitHub issue. This write action is immediate.
+
+    GitHub also accepts this endpoint for pull-request conversation comments. Use
+    only with explicit user instruction; it requires GITHUB_TOKEN and is not retried.
+    """
+    try:
+        return _client().comment_on_issue(owner, repo, issue_number, body).model_dump()
+    except Exception as exc:
+        raise _github_error(exc) from exc
+
+
 def main() -> None:
     """Run the MCP server with the SDK default transport."""
     mcp.run()

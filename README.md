@@ -1,7 +1,7 @@
 # RepoPilot MCP
 
 RepoPilot MCP is a small Python Model Context Protocol server for safe,
-read-only GitHub repository inspection.
+ GitHub repository inspection with deliberately limited write actions.
 
 ## Included
 
@@ -105,3 +105,11 @@ Pull-request inspection is also read-only:
 - `get_pull_request_files(owner, repo, pull_number, ...)` returns changed-file
   metadata and available patches. Patches over 12,000 characters are explicitly
   truncated; unavailable patches remain `null`.
+
+## Write Safety
+
+The only write tools are `create_issue` and `comment_on_issue`. Both require a
+`GITHUB_TOKEN`, validate their inputs before contacting GitHub, and are never
+automatically retried. They should be used only with explicit user instruction.
+GitHub's issue-comment endpoint also supports pull-request conversation comments;
+this does not add review, approval, merge, or other pull-request write support.
